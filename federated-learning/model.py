@@ -1,13 +1,30 @@
 import torch.nn as nn
 
 class CNN(nn.Module):
+    """Model CNN untuk klasifikasi MNIST"""
     def __init__(self):
         super(CNN, self).__init__()
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, stride=1)  # Untuk dataset MNIST (1 channel)
-        self.fc1 = nn.Linear(32 * 26 * 26, 10)  # 10 kelas untuk MNIST
-
+        self.conv1 = nn.Sequential(         
+            nn.Conv2d(
+                in_channels=1,              
+                out_channels=16,            
+                kernel_size=5,               
+                stride=1,                   
+                padding=2,                  
+            ),                              
+            nn.ReLU(),                      
+            nn.MaxPool2d(kernel_size=2),    
+        )
+        self.conv2 = nn.Sequential(         
+            nn.Conv2d(16, 32, 5, 1, 2),     
+            nn.ReLU(),                      
+            nn.MaxPool2d(2),                
+        )
+        self.out = nn.Linear(32 * 7 * 7, 10)
+        
     def forward(self, x):
-        x = nn.functional.relu(self.conv1(x))
-        x = x.view(-1, 32 * 26 * 26)
-        x = self.fc1(x)
-        return x
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = x.view(x.size(0), -1)          
+        output = self.out(x)
+        return output
