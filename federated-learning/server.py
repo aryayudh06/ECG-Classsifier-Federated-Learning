@@ -1,70 +1,78 @@
 import torch
-import torch.nn as nn
 import socket
-import pickle
 import threading
-from model import ResNet18
+import time
+from model import ECGResNet18
 from utils import send_msg, recv_msg
 
 class FederatedServer:
     def __init__(self, host='localhost', port=5000):
-        self.global_model = ResNet18()
+        self.global_model = ECGResNet18(num_classes=6)
         self.client_models = []
         self.clients_connected = 0
         self.rounds_completed = 0
         self.max_clients = 2
+        self.shutdown_flag = False
         
         # Setup socket
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.socket.bind((host, port))
-        self.socket.listen(5)
-        
-        print(f"Server listening on {host}:{port}")
-        
+        self.socket.settimeout(2.0)  # Add timeout for accept()
+        try:
+            self.socket.bind((host, port))
+            self.socket.listen(5)
+            print(f"Server initialized on {host}:{port}")
+        except socket.error as e:
+            print(f"Socket error: {e}")
+            raise
+
     def handle_client(self, conn, addr):
         print(f"Connection established with {addr}")
         self.clients_connected += 1
+        conn.settimeout(30.0)  # Set timeout for client operations
 
         try:
-            while True:
-                message = recv_msg(conn)
-                if message is None:
-                    print(f"No message from {addr}, client may have disconnected.")
+            while not self.shutdown_flag:
+                try:
+                    message = recv_msg(conn)
+                    if message is None:
+                        print(f"Client {addr} disconnected")
+                        break
+
+                    print(f"Received {message['type']} from {addr}")
+                    
+                    if message['type'] == 'GET_MODEL':
+                        response = {
+                            'type': 'MODEL',
+                            'model_state': self.global_model.state_dict()
+                        }
+                        send_msg(conn, response)
+
+                    elif message['type'] == 'SEND_MODEL':
+                        client_model = ECGResNet18(num_classes=6)
+                        client_model.load_state_dict(message['model_state'])
+                        self.client_models.append(client_model)
+                        print(f"Received model from client {message['client_id']}")
+
+                        if len(self.client_models) == self.max_clients:
+                            self.aggregate()
+                            self.rounds_completed += 1
+                            print(f"Round {self.rounds_completed} completed")
+                            self.client_models = []
+
+                        send_msg(conn, {'type': 'ACK'})
+
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    print(f"Error handling client {addr}: {e}")
                     break
-
-                print(f"Server received message: {message['type']} from {addr}")
-                
-                if message['type'] == 'GET_MODEL':
-                    response = {
-                        'type': 'MODEL',
-                        'model_state': self.global_model.state_dict()
-                    }
-                    send_msg(conn, response)
-
-                elif message['type'] == 'SEND_MODEL':
-                    print(f"Server received model from client {addr}")
-                    client_model = CNN()
-                    client_model.load_state_dict(message['model_state'])
-                    self.client_models.append(client_model)
-
-                    if len(self.client_models) == self.max_clients:
-                        self.aggregate()
-                        self.rounds_completed += 1
-                        print(f"Round {self.rounds_completed} completed")
-                        self.client_models = []
-
-                    send_msg(conn, {'type': 'ACK'})
-
-        except Exception as e:
-            print(f"Error with client {addr}: {e}")
 
         finally:
             conn.close()
             self.clients_connected -= 1
             print(f"Client {addr} disconnected")
 
-        
     def aggregate(self):
         """Federated Averaging aggregation"""
         print("Aggregating models...")
@@ -76,40 +84,35 @@ class FederatedServer:
             ).mean(0)
 
         self.global_model.load_state_dict(global_dict)
-        print("Model aggregation complete.")
+        print("Aggregation complete")
 
-        # Simpan model setelah setiap agregasi
-        model_path = f"data/local_model/global_model_round_{self.rounds_completed + 1}.pt"
-        torch.save(self.global_model.state_dict(), model_path)
-        print(f"Global model saved to {model_path}")
-
-        
-    def start(self):
-        """Start the server to accept connections"""
+    def start_server(self):
+        """Start the server with proper shutdown handling"""
+        print("Server starting...")
         try:
-            while True:
-                conn, addr = self.socket.accept()
-                thread = threading.Thread(target=self.handle_client, args=(conn, addr))
-                thread.start()
-        except KeyboardInterrupt:
-            print("Shutting down server...")
-        finally:
-            self.socket.close()
+            while not self.shutdown_flag:
+                try:
+                    conn, addr = self.socket.accept()
+                    client_thread = threading.Thread(
+                        target=self.handle_client,
+                        args=(conn, addr),
+                        daemon=True
+                    )
+                    client_thread.start()
+                    print(f"Active connections: {threading.active_count() - 1}")
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    print(f"Server accept error: {e}")
+                    break
 
-    def recv_all(self, sock, length, timeout=10):
-        """Receive all data from socket with timeout"""
-        sock.settimeout(timeout)
-        data = b''
-        while len(data) < length:
-            try:
-                packet = sock.recv(length - len(data))
-                if not packet:
-                    raise RuntimeError("Connection closed unexpectedly")
-                data += packet
-            except socket.timeout:
-                raise RuntimeError("Timeout occurred while waiting for data")
-        return data
+        except KeyboardInterrupt:
+            print("\nServer shutdown requested")
+        finally:
+            self.shutdown_flag = True
+            self.socket.close()
+            print("Server shutdown complete")
 
 if __name__ == '__main__':
     server = FederatedServer()
-    server.start()
+    server.start_server()
