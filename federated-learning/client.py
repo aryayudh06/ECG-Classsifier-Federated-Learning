@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader, Subset
 import socket
 import pickle
 import time
-from model import CNN
+from model import ResNet18
 from utils import send_msg, recv_msg
 
 
@@ -21,7 +21,7 @@ class FederatedClient:
         self.train_loader = DataLoader(train_data, batch_size=64, shuffle=True)
         
         # Model and optimizer
-        self.model = CNN()
+        self.model = ResNet18()
         self.optimizer = optim.SGD(self.model.parameters(), lr=0.01, momentum=0.9)
         self.criterion = nn.CrossEntropyLoss()
         
@@ -123,10 +123,15 @@ class FederatedClient:
 
 def prepare_client_data(client_id):
     """Prepare MNIST data for specific client"""
+    from torchvision import transforms
+
     transform = transforms.Compose([
+        transforms.Resize((224, 224)),                   # resize ke 224x224 (ukuran default ResNet)
+        transforms.Grayscale(num_output_channels=3),     # ubah dari 1 channel jadi 3 channel
         transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,))
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))  # Normalisasi untuk 3 channel
     ])
+
     
     train_data = datasets.MNIST('./data', train=True, download=True, transform=transform)
     

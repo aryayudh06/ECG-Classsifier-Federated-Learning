@@ -3,12 +3,12 @@ import torch.nn as nn
 import socket
 import pickle
 import threading
-from model import CNN
+from model import ResNet18
 from utils import send_msg, recv_msg
 
 class FederatedServer:
     def __init__(self, host='localhost', port=5000):
-        self.global_model = CNN()
+        self.global_model = ResNet18()
         self.client_models = []
         self.clients_connected = 0
         self.rounds_completed = 0

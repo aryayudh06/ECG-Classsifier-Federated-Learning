@@ -1,4 +1,5 @@
 import torch.nn as nn
+from torchvision import models
 
 class CNN(nn.Module):
     """Model CNN untuk klasifikasi MNIST"""
@@ -28,3 +29,8 @@ class CNN(nn.Module):
         x = x.view(x.size(0), -1)          
         output = self.out(x)
         return output
+    
+def ResNet18(num_classes=8):
+    model = models.resnet18()
+    model.fc = nn.Linear(model.fc.in_features, num_classes)
+    return model
