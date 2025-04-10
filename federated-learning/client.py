@@ -56,6 +56,8 @@ class FederatedClient:
         else:
             raise RuntimeError("Invalid response from server or no model received")
     
+    
+    
     def local_train(self, epochs=1):
         """Train model on local data"""
         self.model.train()
@@ -68,101 +70,115 @@ class FederatedClient:
                 self.optimizer.step()
         return self.model.state_dict()
     
-    def participate_in_fl(self, rounds=10):
-        """Participate in federated learning rounds"""
-        for round in range(rounds):
-            print(f"Client {self.client_id} starting round {round + 1}")
-            
-            # Get global model from server
+    def participate_in_fl(self, rounds=1):
+        for rnd in range(rounds):
+            print(f"Client {self.client_id} - Round {rnd+1}/{rounds}")
             self.get_global_model()
-            
-            # Train locally
-            local_state = self.local_train(epochs=1)
-            
-            # Send updated model to server
+
+            self.model.train()
+            total_loss = 0.0
+            for data, target in self.train_loader:
+                self.optimizer.zero_grad()
+                output = self.model(data)
+                loss = self.criterion(output, target)
+                loss.backward()
+                self.optimizer.step()
+                total_loss += loss.item()
+            print(f"Client {self.client_id} - Epoch loss: {total_loss:.4f}")
+
+            self.evaluate_model()
+
             message = {
-                'type': 'SEND_MODEL',
+                'type': 'UPDATE',
                 'client_id': self.client_id,
-                'model_state': local_state
+                'model_state': self.model.state_dict()
             }
             send_msg(self.socket, message)
-            
-            # Wait for acknowledgment
-            response = recv_msg(self.socket)
-            if not response or response['type'] != 'ACK':
-                print(f"Client {self.client_id} failed to receive ACK from server")
-                break
-            
-            print(f"Client {self.client_id} completed round {round + 1}")
-            time.sleep(1)  # Small delay between rounds
+            print(f"Client {self.client_id} - Sent updated model to server")
 
-def load_mitbih_record(record_name, data_dir):
-    """Load a single MIT-BIH record"""
+    def evaluate_model(self):
+        """Evaluate model accuracy on local data"""
+        self.model.eval()
+        correct = 0
+        total = 0
+
+        with torch.no_grad():
+            for data, target in self.train_loader:
+                output = self.model(data)
+                _, predicted = torch.max(output, 1)
+                correct += (predicted == target).sum().item()
+                total += target.size(0)
+
+        accuracy = 100 * correct / total
+        print(f"Client {self.client_id} - Accuracy: {accuracy:.2f}%")
+        return accuracy
+
+def load_mitbih_record_rr(record_name, data_dir, fs=360):
+    """Load MIT-BIH record and extract RR interval features"""
     record_path = os.path.join(data_dir, record_name)
     signals, fields = wfdb.rdsamp(record_path)
     annotations = wfdb.rdann(record_path, 'atr')
     
-    # Get beats and their types (only using MLII lead)
-    beats = []
-    beat_types = []
-    
-    for i, symbol in enumerate(annotations.symbol):
-        if symbol in ['N', 'L', 'R', 'V', 'A', 'F']:  # Normal and common arrhythmia types
-            sample = annotations.sample[i]
-            if sample > 180 and sample < len(signals) - 180:  # Ensure we have enough samples
-                beat = signals[sample-180:sample+180, 0]  # Using MLII lead
-                beats.append(beat)
-                
-                # Map annotation to class index
-                if symbol == 'N':   # Normal beat
-                    beat_types.append(0)
-                elif symbol == 'L': # Left bundle branch block beat
-                    beat_types.append(1)
-                elif symbol == 'R':  # Right bundle branch block beat
-                    beat_types.append(2)
-                elif symbol == 'V':  # Premature ventricular contraction
-                    beat_types.append(3)
-                elif symbol == 'A':  # Atrial premature contraction
-                    beat_types.append(4)
-                elif symbol == 'F': # Fusion of ventricular and normal
-                    beat_types.append(5)
-    
-    return np.array(beats), np.array(beat_types)
+    rr_features = []
+    rr_labels = []
 
-def prepare_client_data(client_id, data_dir='mitdb', records_per_client=5):
-    """Prepare MIT-BIH data for specific client"""
-    # List of available MIT-BIH records (first 48 records)
+    # Ambil hanya label yang digunakan
+    beat_classes = ['N', 'L', 'R', 'V', 'A', 'F']
+    beat_class_map = {'N':0, 'L':1, 'R':2, 'V':3, 'A':4, 'F':5}
+    
+    beat_indices = []
+    beat_symbols = []
+    for i, symbol in enumerate(annotations.symbol):
+        if symbol in beat_classes:
+            sample = annotations.sample[i]
+            beat_indices.append(sample)
+            beat_symbols.append(symbol)
+    
+    # Hitung RR interval
+    rr_intervals = np.diff(beat_indices)  # dalam sample
+    rr_intervals_sec = rr_intervals / fs  # dalam detik
+    
+    for i in range(1, len(rr_intervals) - 1):
+        # Gunakan 3 RR interval: RR-1, RR0, RR+1
+        rr_window = [
+            rr_intervals_sec[i-1],
+            rr_intervals_sec[i],
+            rr_intervals_sec[i+1]
+        ]
+        rr_features.append(rr_window)
+        rr_labels.append(beat_class_map[beat_symbols[i]])
+
+    return np.array(rr_features), np.array(rr_labels)
+
+def prepare_client_data_rr(client_id, data_dir='mitdb', records_per_client=5):
+    """Prepare MIT-BIH data with RR interval features for specific client"""
     all_records = [f'{i:03}' for i in range(100, 124)] + [f'{i:03}' for i in range(200, 224)]
     
-    # Select records for this client
     start_idx = (client_id - 1) * records_per_client
     client_records = all_records[start_idx:start_idx + records_per_client]
     
-    # Load and combine selected records
-    all_beats = []
+    all_rr = []
     all_labels = []
     
     for record in client_records:
         try:
-            beats, labels = load_mitbih_record(record, data_dir)
-            all_beats.append(beats)
+            rr, labels = load_mitbih_record_rr(record, data_dir)
+            all_rr.append(rr)
             all_labels.append(labels)
         except Exception as e:
             print(f"Error loading record {record}: {e}")
             continue
     
-    if len(all_beats) == 0:
+    if len(all_rr) == 0:
         raise ValueError(f"No valid data loaded for client {client_id}")
     
-    # Combine all beats and labels
-    beats = np.vstack(all_beats)
+    features = np.vstack(all_rr)
     labels = np.concatenate(all_labels)
     
-    # Convert to PyTorch tensors
-    beats_tensor = torch.FloatTensor(beats).unsqueeze(1)  # Add channel dimension
+    features_tensor = torch.FloatTensor(features)
     labels_tensor = torch.LongTensor(labels)
     
-    return TensorDataset(beats_tensor, labels_tensor)
+    return TensorDataset(features_tensor, labels_tensor)
 
 if __name__ == '__main__':
     import sys
@@ -176,7 +192,7 @@ if __name__ == '__main__':
     
     try:
         # Prepare client-specific ECG data from MIT-BIH
-        train_data = prepare_client_data(client_id, data_dir)
+        train_data = prepare_client_data_rr(client_id, data_dir)
         
         # Create and run client
         client = FederatedClient(client_id, train_data)
