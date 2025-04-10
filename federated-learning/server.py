@@ -6,7 +6,7 @@ from model import ECGResNet18
 from utils import send_msg, recv_msg
 
 class FederatedServer:
-    def __init__(self, host='localhost', port=5000):
+    def __init__(self, host='127.0.0.1', port=5000):
         self.global_model = ECGResNet18(num_classes=6)
         self.client_models = []
         self.clients_connected = 0
@@ -92,7 +92,9 @@ class FederatedServer:
         try:
             while not self.shutdown_flag:
                 try:
+                    print("Waiting for connections...")  # Add this line
                     conn, addr = self.socket.accept()
+                    print(f"Connection from {addr}")  # Add this line
                     client_thread = threading.Thread(
                         target=self.handle_client,
                         args=(conn, addr),
@@ -101,11 +103,11 @@ class FederatedServer:
                     client_thread.start()
                     print(f"Active connections: {threading.active_count() - 1}")
                 except socket.timeout:
+                    print("Timeout waiting for connection")  # Add this line
                     continue
                 except Exception as e:
                     print(f"Server accept error: {e}")
                     break
-
         except KeyboardInterrupt:
             print("\nServer shutdown requested")
         finally:

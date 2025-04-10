@@ -1,76 +1,41 @@
+import wfdb
+import os
+import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, Subset
-import socket
-import pickle
-import time
-from model import ECGResNet18  # Changed import
-from utils import send_msg, recv_msg
 
+class MITBIHDataset(torch.utils.data.Dataset):
+    def _init_(self, record_path, segment_length=360):
+        record = wfdb.rdrecord(record_path)
+        self.signal = record.p_signal[:, 0]  # Ambil 1 lead saja
+        self.segment_length = segment_length
 
-class FederatedClient:
-    def __init__(self, client_id, train_data, server_host='localhost', server_port=5000, client_port=5001):
-        self.client_id = client_id
-        self.server_host = server_host
-        self.server_port = server_port
-        self.client_port = client_port
-        
-        # Local data
-        self.train_loader = DataLoader(train_data, batch_size=64, shuffle=True)
-        
-        # Model and optimizer
-        self.model = ECGResNet18(num_classes=6)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)  # Consistent optimizer
-        self.criterion = nn.CrossEntropyLoss()
-        
-        # Setup socket
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.socket.bind(('localhost', client_port))
-    
-    # [Rest of the methods remain exactly the same]
-    
-    def get_global_model(self):
-        """Request and receive global model from server"""
-        message = {'type': 'GET_MODEL'}
-        send_msg(self.socket, message)
+        self.samples = []
+        for i in range(0, len(self.signal) - segment_length, segment_length):
+            segment = self.signal[i:i+segment_length]
+            self.samples.append(segment)
 
-        response = recv_msg(self.socket)
-        
-        if response and response['type'] == 'MODEL':
-            self.model.load_state_dict(response['model_state'])
-            # Keep the same optimizer type (Adam) and just update its parameters
-            self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
-        else:
-            raise RuntimeError("Invalid response from server or no model received")
+        # Dummy label, ganti sesuai anotasi jika ada
+        self.labels = np.random.randint(0, 6, len(self.samples))
+
+    def _len_(self):
+        return len(self.samples)
+
+    def _getitem_(self, idx):
+        x = torch.tensor(self.samples[idx], dtype=torch.float32).unsqueeze(0)  # [1, 360]
+        y = torch.tensor(self.labels[idx], dtype=torch.long)
+        return x, y
 
 def prepare_client_data(client_id):
-    """Prepare ECG data for specific client"""
-    # This should be replaced with actual ECG data loading
-    # For now creating dummy ECG-like data (batch_size, 1, 360) for 1-second ECG at 360Hz
-    class DummyECGDataset(torch.utils.data.Dataset):
-        def __init__(self, num_samples=1000):
-            self.x = torch.randn(num_samples, 1, 360)  # Random ECG-like data
-            self.y = torch.randint(0, 6, (num_samples,))  # Random labels (6 classes)
-            
-        def __len__(self):
-            return len(self.x)
-            
-        def __getitem__(self, idx):
-            return self.x[idx], self.y[idx]
+    """Load MIT-BIH ECG data per client"""
+    # Daftar nama file rekaman MIT-BIH yang kamu miliki (tanpa ekstensi .dat/.hea)
+    records = ['100', '101', '102', '103', '104']
     
-    return DummyECGDataset()
-
-if __name__ == '__main__':
-    import sys
-    client_id = int(sys.argv[1])
-    client_port = 5000 + client_id
+    # Pilih salah satu berdasarkan client_id
+    record_name = records[client_id % len(records)]
     
-    # Prepare client-specific ECG data
-    train_data = prepare_client_data(client_id)
+    # Ganti ini ke path folder di mana data MIT-BIH kamu disimpan
+    mitbih_data_dir = "data/mit-bih-arrhythmia-database-1.0.0"  # <- ubah ini
     
-    # Create and run client
-    client = FederatedClient(client_id, train_data, client_port=client_port)
-    client.connect_to_server()
-    client.participate_in_fl(rounds=10)
+    record_path = os.path.join(mitbih_data_dir, record_name)
+    
+    return MITBIHDataset(record_path)
