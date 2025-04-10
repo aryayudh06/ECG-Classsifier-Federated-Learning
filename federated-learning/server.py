@@ -1,38 +1,60 @@
-from flask import Flask, request, jsonify
 import torch
+import torch.nn as nn
+import copy
 import numpy as np
-from model import CNN
+from collections import OrderedDict
 
-app = Flask(__name__)
-global_model = CNN()  # Model global
-clients_weights = []  # Penyimpanan sementara bobot klien
-sample_sizes = []     # Jumlah sampel dari setiap klien
-
-@app.route('/update', methods=['POST'])
-def receive_update():
-    data = request.json
-    weights = [torch.tensor(np.array(w)) for w in data['weights']]
-    clients_weights.append(weights)
-    sample_sizes.append(data['sample_size'])
-    
-    if len(clients_weights) == 2:  # Jika 2 klien sudah mengirim update
-        # Agregasi FedAvg
-        averaged_weights = []
-        for i in range(len(clients_weights[0])):
-            weighted_sum = torch.zeros_like(clients_weights[0][i])
-            for w, n in zip(clients_weights, sample_sizes):
-                weighted_sum += w[i] * (n / sum(sample_sizes))
-            averaged_weights.append(weighted_sum)
+class Server:
+    def __init__(self):
+        # Inisialisasi model global
+        self.global_model = CNN()
+        self.global_optimizer = torch.optim.SGD(self.global_model.parameters(), lr=0.01)
+        self.client_models = []
+        
+    def aggregate(self):
+        """Melakukan agregasi Federated Averaging"""
+        global_dict = self.global_model.state_dict()
+        
+        # Akumulasi weight dari semua client
+        for k in global_dict.keys():
+            global_dict[k] = torch.stack([client_model.state_dict()[k].float() 
+                                        for client_model in self.client_models], 0).mean(0)
         
         # Update model global
-        global_model.load_state_dict({k: v for k, v in zip(global_model.state_dict().keys(), averaged_weights)})
-        clients_weights.clear()
-        sample_sizes.clear()
+        self.global_model.load_state_dict(global_dict)
         
-        # Kirim bobot baru ke klien
-        global_weights = [w.tolist() for w in averaged_weights]
-        return jsonify({'weights': global_weights})
-    return jsonify({'message': 'Menunggu klien lain...'})
+        # Kosongkan daftar model client
+        self.client_models = []
+        
+    def distribute_model(self):
+        """Mengirim model global ke client"""
+        return copy.deepcopy(self.global_model)
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+class CNN(nn.Module):
+    """Model CNN untuk klasifikasi MNIST"""
+    def __init__(self):
+        super(CNN, self).__init__()
+        self.conv1 = nn.Sequential(         
+            nn.Conv2d(
+                in_channels=1,              
+                out_channels=16,            
+                kernel_size=5,               
+                stride=1,                   
+                padding=2,                  
+            ),                              
+            nn.ReLU(),                      
+            nn.MaxPool2d(kernel_size=2),    
+        )
+        self.conv2 = nn.Sequential(         
+            nn.Conv2d(16, 32, 5, 1, 2),     
+            nn.ReLU(),                      
+            nn.MaxPool2d(2),                
+        )
+        self.out = nn.Linear(32 * 7 * 7, 10)
+        
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = x.view(x.size(0), -1)          
+        output = self.out(x)
+        return output
