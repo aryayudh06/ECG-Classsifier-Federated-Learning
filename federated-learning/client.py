@@ -10,28 +10,26 @@ import wfdb
 import os
 from model import ECGResNet18
 from utils import send_msg, recv_msg
+from sklearn.model_selection import train_test_split
 
 
 class FederatedClient:
-    def __init__(self, client_id, train_data, server_host='localhost', server_port=5000):
+    def __init__(self, client_id, train_data, test_dataset=None, server_host='localhost', server_port=5000):
         self.client_id = client_id
         self.server_host = server_host
         self.server_port = server_port
         
-        # Local data
         self.train_loader = DataLoader(train_data, batch_size=64, shuffle=True)
-        
-        # Model and optimizer
+        self.test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False) if test_dataset else None
+
         self.model = ECGResNet18(num_classes=6)
         self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
         self.criterion = nn.CrossEntropyLoss()
-        
-        # Setup socket
+
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    
+
     def connect_to_server(self):
-        """Connect to the federated learning server"""
         try:
             self.socket.connect((self.server_host, self.server_port))
             print(f"Client {self.client_id} connected to server at {self.server_host}:{self.server_port}")
@@ -39,27 +37,21 @@ class FederatedClient:
         except socket.error as e:
             print(f"Connection failed for client {self.client_id}: {e}")
             return False
-    
+
     def get_global_model(self):
-        """Request and receive global model from server"""
         message = {
             'type': 'GET_MODEL',
             'client_id': self.client_id
         }
         send_msg(self.socket, message)
-
         response = recv_msg(self.socket)
-        
         if response and response['type'] == 'MODEL':
             self.model.load_state_dict(response['model_state'])
             self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
         else:
             raise RuntimeError("Invalid response from server or no model received")
-    
-    
-    
+
     def local_train(self, epochs=1):
-        """Train model on local data"""
         self.model.train()
         for epoch in range(epochs):
             for data, target in self.train_loader:
@@ -69,23 +61,48 @@ class FederatedClient:
                 loss.backward()
                 self.optimizer.step()
         return self.model.state_dict()
-    
+
+    def evaluate_model(self):
+        self.model.eval()
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for data, target in self.train_loader:
+                output = self.model(data)
+                _, predicted = torch.max(output, 1)
+                correct += (predicted == target).sum().item()
+                total += target.size(0)
+        accuracy = 100 * correct / total
+        print(f"Client {self.client_id} - [TRAIN] Accuracy: {accuracy:.2f}%")
+        return accuracy
+
+    def evaluate_on_test(self):
+        self.model.eval()
+        if self.test_loader is None:
+            print(f"Client {self.client_id} - No test data available.")
+            return
+        correct = 0
+        total = 0
+        total_loss = 0.0
+        with torch.no_grad():
+            for data, target in self.test_loader:
+                output = self.model(data)
+                loss = self.criterion(output, target)
+                total_loss += loss.item()
+                _, predicted = torch.max(output, 1)
+                correct += (predicted == target).sum().item()
+                total += target.size(0)
+        accuracy = 100 * correct / total
+        avg_loss = total_loss / len(self.test_loader)
+        print(f"Client {self.client_id} - [TEST] Accuracy: {accuracy:.2f}% | Loss: {avg_loss:.4f}")
+        return accuracy, avg_loss
+
     def participate_in_fl(self, rounds=1):
         for rnd in range(rounds):
             print(f"Client {self.client_id} - Round {rnd+1}/{rounds}")
             self.get_global_model()
 
-            self.model.train()
-            total_loss = 0.0
-            for data, target in self.train_loader:
-                self.optimizer.zero_grad()
-                output = self.model(data)
-                loss = self.criterion(output, target)
-                loss.backward()
-                self.optimizer.step()
-                total_loss += loss.item()
-            print(f"Client {self.client_id} - Epoch loss: {total_loss:.4f}")
-
+            self.local_train()
             self.evaluate_model()
 
             message = {
@@ -96,22 +113,11 @@ class FederatedClient:
             send_msg(self.socket, message)
             print(f"Client {self.client_id} - Sent updated model to server")
 
-    def evaluate_model(self):
-        """Evaluate model accuracy on local data"""
-        self.model.eval()
-        correct = 0
-        total = 0
+        # Hanya tes sekali setelah semua training selesai
+        self.evaluate_on_test()
 
-        with torch.no_grad():
-            for data, target in self.train_loader:
-                output = self.model(data)
-                _, predicted = torch.max(output, 1)
-                correct += (predicted == target).sum().item()
-                total += target.size(0)
 
-        accuracy = 100 * correct / total
-        print(f"Client {self.client_id} - Accuracy: {accuracy:.2f}%")
-        return accuracy
+
 
 def load_mitbih_record_rr(record_name, data_dir, fs=360):
     """Load MIT-BIH record and extract RR interval features"""
@@ -191,14 +197,25 @@ if __name__ == '__main__':
     data_dir = 'data/mit-bih-arrhythmia-database-1.0.0/'
     
     try:
-        # Prepare client-specific ECG data from MIT-BIH
-        train_data = prepare_client_data_rr(client_id, data_dir)
-        
-        # Create and run client
-        client = FederatedClient(client_id, train_data)
+        dataset = prepare_client_data_rr(client_id, data_dir)
+        features, labels = dataset.tensors  # ambil tensors-nya
+
+        # Split 80% train, 20% test
+        X_train, X_test, y_train, y_test = train_test_split(
+            features.numpy(), labels.numpy(), test_size=0.2, random_state=42
+        )
+
+        # Buat dataset baru
+        train_dataset = TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.long))
+        test_dataset = TensorDataset(torch.tensor(X_test, dtype=torch.float32), torch.tensor(y_test, dtype=torch.long))
+
+        # Create and run client pakai train_dataset
+        client = FederatedClient(client_id, train_dataset, test_dataset=test_dataset)
+
         if client.connect_to_server():
             client.participate_in_fl(rounds=10)
         else:
             print(f"Client {client_id} failed to connect to server")
+
     except Exception as e:
         print(f"Client {client_id} error: {e}")
